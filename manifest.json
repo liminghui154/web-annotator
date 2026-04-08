@@ -5,7 +5,8 @@
   "description": "在任意网页添加笔记和高亮标注",
   "permissions": [
     "storage",
-    "activeTab"
+    "activeTab",
+    "sidePanel"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -21,8 +22,7 @@
     "default_path": "sidebar.html"
   },
   "background": {
-    "service_worker": "background.js",
-    "type": "module"
+    "service_worker": "background.js"
   },
   "content_scripts": [
     {
