@@ -161,7 +161,7 @@ async function deleteAnnotation(url, annotationId) {
 }
 
 function exportAsMarkdown() {
-  let md = '# Web Annotator 标注导出\n\n';
+  let md = '# 猫爪标注导出\n\n';
   md += `> ${new Date().toLocaleString()} | 共 ${allAnnotations.length} 条\n\n---\n\n`;
 
   const groups = {};

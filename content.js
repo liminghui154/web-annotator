@@ -5,23 +5,27 @@
 
   const ANNOTATION_CLASS = 'web-annotator-highlight';
   const POPUP_CLASS = 'web-annotator-popup';
+  const TOOLBAR_CLASS = 'web-annotator-toolbar';
 
   let annotations = [];
   let activePopup = null;
-  let selectionTimer = null;
+  let activeToolbar = null;
+  let pendingSelection = null;
+  let currentUrl = '';
+  let mutationObserver = null;
+  let rerenderTimer = null;
+  let rerenderRetryTimers = [];
+  let navigationHooked = false;
 
   // ==================== 初始化 ====================
 
   async function init() {
-    const url = getPageUrl();
-    try {
-      annotations = await sendMessage({ action: 'getForUrl', url }) || [];
-    } catch (e) {
-      annotations = [];
-    }
-    renderAllAnnotations();
+    currentUrl = getPageUrl();
+    await loadAnnotationsForCurrentPage();
     setupSelectionHandler();
     setupMessageListener();
+    setupNavigationListener();
+    setupDomObserver();
   }
 
   function getPageUrl() {
@@ -43,6 +47,120 @@
       } catch (e) {
         reject(e);
       }
+    });
+  }
+
+  function isContextInvalidatedError(error) {
+    return Boolean(error && /Extension context invalidated/i.test(String(error.message || error)));
+  }
+
+  function notifyContextInvalidated() {
+    removeToolbar();
+    removePopup();
+    window.alert('扩展已更新或重载，当前页面中的旧脚本已失效。请刷新页面后再试。');
+  }
+
+  async function loadAnnotationsForCurrentPage() {
+    currentUrl = getPageUrl();
+    clearHighlights();
+    clearRerenderRetries();
+
+    try {
+      annotations = await sendMessage({ action: 'getForUrl', url: currentUrl }) || [];
+    } catch (e) {
+      annotations = [];
+      if (isContextInvalidatedError(e)) {
+        notifyContextInvalidated();
+        return;
+      }
+      console.error('Failed to load annotations:', e);
+    }
+
+    renderAllAnnotations();
+    scheduleRerender();
+    scheduleRerenderRetries();
+  }
+
+  function scheduleRerender(delay = 300) {
+    if (rerenderTimer) {
+      clearTimeout(rerenderTimer);
+    }
+
+    rerenderTimer = setTimeout(() => {
+      rerenderTimer = null;
+      renderAllAnnotations();
+    }, delay);
+  }
+
+  function clearRerenderRetries() {
+    rerenderRetryTimers.forEach(timerId => clearTimeout(timerId));
+    rerenderRetryTimers = [];
+  }
+
+  function scheduleRerenderRetries() {
+    [800, 1800, 3500, 6000].forEach((delay) => {
+      const timerId = setTimeout(() => {
+        renderAllAnnotations();
+      }, delay);
+      rerenderRetryTimers.push(timerId);
+    });
+  }
+
+  function clearHighlights() {
+    removeToolbar();
+    removePopup();
+
+    document.querySelectorAll(`mark.${ANNOTATION_CLASS}`).forEach(mark => {
+      const parent = mark.parentNode;
+      if (!parent) return;
+
+      while (mark.firstChild) {
+        parent.insertBefore(mark.firstChild, mark);
+      }
+
+      parent.removeChild(mark);
+      parent.normalize();
+    });
+  }
+
+  function handlePossibleNavigation() {
+    const nextUrl = getPageUrl();
+    if (nextUrl === currentUrl) return;
+    loadAnnotationsForCurrentPage();
+  }
+
+  function setupNavigationListener() {
+    if (navigationHooked) return;
+    navigationHooked = true;
+
+    const wrapHistoryMethod = (methodName) => {
+      const original = history[methodName];
+      if (typeof original !== 'function') return;
+
+      history[methodName] = function () {
+        const result = original.apply(this, arguments);
+        setTimeout(handlePossibleNavigation, 0);
+        return result;
+      };
+    };
+
+    wrapHistoryMethod('pushState');
+    wrapHistoryMethod('replaceState');
+    window.addEventListener('popstate', handlePossibleNavigation);
+  }
+
+  function setupDomObserver() {
+    if (mutationObserver) return;
+
+    mutationObserver = new MutationObserver(() => {
+      if (!annotations.length) return;
+      scheduleRerender(200);
+    });
+
+    mutationObserver.observe(document.body, {
+      childList: true,
+      subtree: true,
+      characterData: true
     });
   }
 
@@ -69,55 +187,118 @@
   // ==================== 选中文字处理 ====================
 
   function setupSelectionHandler() {
-    document.addEventListener('mouseup', handleSelection);
-    document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') {
-        removePopup();
-        window.getSelection().removeAllRanges();
-      }
-    });
+    document.addEventListener('mouseup', scheduleToolbarForSelection);
+    document.addEventListener('keyup', handleKeyup);
+    document.addEventListener('mousedown', handleDocumentMouseDown);
   }
 
-  function handleSelection(e) {
-    if (activePopup && activePopup.contains(e.target)) return;
-
-    if (selectionTimer) {
-      clearTimeout(selectionTimer);
-      selectionTimer = null;
+  function handleKeyup(e) {
+    if (e.key === 'Escape') {
+      removeToolbar();
+      removePopup();
+      window.getSelection().removeAllRanges();
+      return;
     }
 
-    removePopup();
+    if (e.target instanceof Element && e.target.closest(`.${POPUP_CLASS}, .${TOOLBAR_CLASS}`)) {
+      return;
+    }
 
-    // 200ms 延迟，避免误触
-    selectionTimer = setTimeout(() => {
-      const selection = window.getSelection();
-      if (!selection || selection.isCollapsed || selection.rangeCount === 0) return;
-
-      const selectedText = selection.toString().trim();
-      if (!selectedText || selectedText.length < 2) return;
-
-      if (selection.anchorNode && selection.anchorNode.parentElement &&
-          selection.anchorNode.parentElement.closest &&
-          selection.anchorNode.parentElement.closest(`.${ANNOTATION_CLASS}`)) return;
-
-      showCreatePopup(selection);
-    }, 200);
+    scheduleToolbarForSelection();
   }
 
-  // ==================== 创建弹窗 ====================
+  function handleDocumentMouseDown(e) {
+    if (e.target instanceof Element && e.target.closest(`.${POPUP_CLASS}, .${TOOLBAR_CLASS}`)) return;
+    removeToolbar();
+  }
 
-  function showCreatePopup(selection) {
+  function scheduleToolbarForSelection() {
+    setTimeout(() => {
+      const selection = getValidSelection();
+      if (!selection) {
+        removeToolbar();
+        pendingSelection = null;
+        return;
+      }
+
+      pendingSelection = captureSelection(selection);
+      showSelectionToolbar(pendingSelection);
+    }, 10);
+  }
+
+  function getValidSelection() {
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed || selection.rangeCount === 0) return null;
+
+    const selectedText = selection.toString().trim();
+    if (!selectedText || selectedText.length < 2) return null;
+
+    if (selection.anchorNode && selection.anchorNode.parentElement &&
+        selection.anchorNode.parentElement.closest &&
+        selection.anchorNode.parentElement.closest(`.${ANNOTATION_CLASS}`)) {
+      return null;
+    }
+
+    return selection;
+  }
+
+  function captureSelection(selection) {
     const range = selection.getRangeAt(0);
     const rect = range.getBoundingClientRect();
 
-    const savedRange = {
+    return {
       startContainer: range.startContainer,
       startOffset: range.startOffset,
       endContainer: range.endContainer,
       endOffset: range.endOffset,
-      selectedText: selection.toString()
+      selectedText: selection.toString(),
+      rect: {
+        left: rect.left,
+        right: rect.right,
+        top: rect.top,
+        bottom: rect.bottom,
+        width: rect.width,
+        height: rect.height
+      }
     };
+  }
 
+  function showSelectionToolbar(savedSelection) {
+    removeToolbar();
+    if (!savedSelection || !savedSelection.rect) return;
+
+    const toolbar = document.createElement('div');
+    toolbar.className = TOOLBAR_CLASS;
+    toolbar.innerHTML = `
+      <button type="button" class="btn-annotate" aria-label="标注">
+        <span class="label">标注</span>
+        <span class="paw" aria-hidden="true"></span>
+      </button>
+    `;
+
+    positionFloatingElement(toolbar, savedSelection.rect, {
+      width: 40,
+      topOffset: 12
+    });
+
+    ['mousedown', 'mouseup', 'click'].forEach(evt => {
+      toolbar.addEventListener(evt, (e) => e.stopPropagation());
+    });
+
+    toolbar.querySelector('.btn-annotate').addEventListener('click', () => {
+      if (!pendingSelection) return;
+      removeToolbar();
+      showCreatePopup(pendingSelection);
+    });
+
+    document.body.appendChild(toolbar);
+    activeToolbar = toolbar;
+  }
+
+  // ==================== 创建弹窗 ====================
+
+  function showCreatePopup(savedRange) {
+    if (!savedRange || !savedRange.rect) return;
     const popup = document.createElement('div');
     popup.className = POPUP_CLASS;
     popup.innerHTML = `
@@ -136,9 +317,10 @@
       </div>
     `;
 
-    popup.style.position = 'fixed';
-    popup.style.left = `${Math.min(rect.left, window.innerWidth - 320)}px`;
-    popup.style.top = `${rect.bottom + 10}px`;
+    positionFloatingElement(popup, savedRange.rect, {
+      width: 320,
+      topOffset: 10
+    });
 
     document.body.appendChild(popup);
     activePopup = popup;
@@ -208,6 +390,10 @@
         }
       }
     } catch (e) {
+      if (isContextInvalidatedError(e)) {
+        notifyContextInvalidated();
+        return;
+      }
       console.error('Failed to create annotation:', e);
     }
   }
@@ -372,6 +558,10 @@
       const ann = annotations.find(a => a.id === annotationId);
       if (ann) ann.text = newText;
     } catch (e) {
+      if (isContextInvalidatedError(e)) {
+        notifyContextInvalidated();
+        return;
+      }
       console.error('Failed to update:', e);
     }
     removePopup();
@@ -382,7 +572,12 @@
     try {
       await sendMessage({ action: 'delete', url, annotationId });
     } catch (e) {
+      if (isContextInvalidatedError(e)) {
+        notifyContextInvalidated();
+        return;
+      }
       console.error('Failed to delete:', e);
+      return;
     }
     annotations = annotations.filter(a => a.id !== annotationId);
     if (markElement) {
@@ -398,7 +593,34 @@
 
   // ==================== 工具函数 ====================
 
+  function positionFloatingElement(element, rect, options = {}) {
+    const width = options.width || 300;
+    const topOffset = options.topOffset || 8;
+    const left = Math.min(
+      Math.max(rect.left + (rect.width / 2) - (width / 2), 8),
+      Math.max(window.innerWidth - width - 8, 8)
+    );
+    const top = Math.min(rect.bottom + topOffset, window.innerHeight - 48);
+
+    element.style.position = 'fixed';
+    element.style.left = `${left}px`;
+    element.style.top = `${top}px`;
+  }
+
+  function removeToolbar() {
+    if (activeToolbar) {
+      activeToolbar.remove();
+      activeToolbar = null;
+    }
+  }
+
   function removePopup() {
+    if (activePopup) {
+      activePopup.remove();
+      activePopup = null;
+      return;
+    }
+
     const popup = document.querySelector(`.${POPUP_CLASS}`);
     if (popup) popup.remove();
     activePopup = null;
