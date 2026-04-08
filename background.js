@@ -1,19 +1,8 @@
 // background.js - 后台脚本，处理存储操作
 
-// 跨浏览器兼容: 优先使用 browser API (Firefox)，fallback 到 chrome (Chrome/Edge)
-const api = typeof browser !== 'undefined' ? browser : chrome;
-
-// 点击扩展图标时打开侧边栏 (仅 Chrome/Edge 支持)
-api.action.onClicked.addListener((tab) => {
-  // 尝试打开侧边栏 (Chrome/Edge)
-  try {
-    if (api.sidePanel) {
-      api.sidePanel.open({ windowId: tab.windowId });
-    }
-  } catch (e) {
-    // Firefox 不支持 sidePanel，侧边栏功能不可用
-    console.log('Side panel not supported in this browser');
-  }
+// 点击扩展图标时打开侧边栏
+chrome.action.onClicked.addListener((tab) => {
+  chrome.sidePanel.open({ windowId: tab.windowId });
 });
 
 // 生成唯一 ID
@@ -23,7 +12,7 @@ function generateId() {
 
 // 获取所有标注
 function getAnnotations() {
-  return api.storage.local.get(['annotations']).then(result => {
+  return chrome.storage.local.get(['annotations']).then(result => {
     return result.annotations || {};
   });
 }
@@ -37,7 +26,7 @@ function saveAnnotation(url, annotation) {
     annotation.id = generateId();
     annotation.createdAt = new Date().toISOString();
     annotations[url].push(annotation);
-    return api.storage.local.set({ annotations }).then(() => annotation);
+    return chrome.storage.local.set({ annotations }).then(() => annotation);
   });
 }
 
@@ -52,7 +41,7 @@ function updateAnnotation(url, annotationId, updates) {
       ...updates,
       updatedAt: new Date().toISOString()
     };
-    return api.storage.local.set({ annotations }).then(() => annotations[url][index]);
+    return chrome.storage.local.set({ annotations }).then(() => annotations[url][index]);
   });
 }
 
@@ -64,7 +53,7 @@ function deleteAnnotation(url, annotationId) {
     if (annotations[url].length === 0) {
       delete annotations[url];
     }
-    return api.storage.local.set({ annotations });
+    return chrome.storage.local.set({ annotations });
   });
 }
 
@@ -84,7 +73,7 @@ function exportData() {
 function importData(jsonStr) {
   try {
     const data = JSON.parse(jsonStr);
-    return api.storage.local.set({ annotations: data }).then(() => true);
+    return chrome.storage.local.set({ annotations: data }).then(() => true);
   } catch (e) {
     console.error('Import failed:', e);
     return false;
@@ -92,7 +81,7 @@ function importData(jsonStr) {
 }
 
 // 监听来自 content script 的消息
-api.runtime.onMessage.addListener((message, sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const { action, url, annotationId, annotation, data } = message;
 
   switch (action) {

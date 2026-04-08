@@ -30,15 +30,12 @@
 
   // ==================== 消息通信 ====================
 
-  // 跨浏览器兼容: 优先使用 browser API (Firefox)，fallback 到 chrome (Chrome/Edge)
-  const extAPI = typeof browser !== 'undefined' ? browser : chrome;
-
   function sendMessage(message) {
     return new Promise((resolve, reject) => {
       try {
-        extAPI.runtime.sendMessage(message, (response) => {
-          if (extAPI.runtime.lastError) {
-            reject(extAPI.runtime.lastError);
+        chrome.runtime.sendMessage(message, (response) => {
+          if (chrome.runtime.lastError) {
+            reject(chrome.runtime.lastError);
           } else {
             resolve(response);
           }
@@ -50,7 +47,7 @@
   }
 
   function setupMessageListener() {
-    extAPI.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (message.action === 'scrollToAnnotation') {
         scrollToAnnotation(message.annotationId);
         sendResponse(true);

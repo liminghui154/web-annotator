@@ -1,8 +1,5 @@
 // sidebar.js - 侧边栏逻辑
 
-// 跨浏览器兼容
-const extAPI = typeof browser !== 'undefined' ? browser : chrome;
-
 let allAnnotations = [];
 let currentFilter = { sort: 'time', color: null, search: '' };
 
@@ -24,7 +21,7 @@ async function loadAnnotations() {
 
 function sendMessage(message) {
   return new Promise(resolve => {
-    extAPI.runtime.sendMessage(message, resolve);
+    chrome.runtime.sendMessage(message, resolve);
   });
 }
 
@@ -147,11 +144,11 @@ function renderGroupedByPage(items, container) {
 }
 
 async function goToAnnotation(url, annotationId) {
-  const [tab] = await extAPI.tabs.query({ active: true, currentWindow: true });
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (tab) {
-    extAPI.tabs.update(tab.id, { url }, () => {
+    chrome.tabs.update(tab.id, { url }, () => {
       setTimeout(() => {
-        extAPI.tabs.sendMessage(tab.id, { action: 'scrollToAnnotation', annotationId });
+        chrome.tabs.sendMessage(tab.id, { action: 'scrollToAnnotation', annotationId });
       }, 1500);
     });
   }
